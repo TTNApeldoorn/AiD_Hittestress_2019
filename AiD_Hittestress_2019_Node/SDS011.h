@@ -7,6 +7,7 @@
 // Documentation:
 //		- The iNovaFitness SDS011 datasheet
 //
+//  Wake-up bug solved (M. Meek)
 
 #if ARDUINO >= 100
 	#include "Arduino.h"
@@ -23,8 +24,7 @@ class SDS011 {
 		void begin(uint8_t pin_rx, uint8_t pin_tx);
 		int read(float *p25, float *p10);
 		void sleep();
-		//void wakeup();
-		void newwakeup(); // added by MM
+		void wakeup();
 		
 	private:
 		uint8_t _pin_rx, _pin_tx;

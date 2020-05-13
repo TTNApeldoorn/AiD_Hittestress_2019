@@ -1,25 +1,25 @@
-  /*******************************************************************************
-   Copyright (c) 2016 Thomas Telkamp, Matthijs Kooijman, Bas Peschier, Harmen Zijp
-   22/7/2019: Adapted for Apeldoorn-In-Data Hittestress by Alex Nijmeijer
+ /*******************************************************************************
+  Copyright (c) 2016 Thomas Telkamp, Matthijs Kooijman, Bas Peschier, Harmen Zijp
+  22/7/2019: Adapted for Apeldoorn-In-Data Hittestress by Alex Nijmeijer
 
-   Permission is hereby granted, free of charge, to anyone
-   obtaining a copy of this document and accompanying files,
-   to do whatever they want with them without any restriction,
-   including, but not limited to, copying, modification and redistribution.
-   NO WARRANTY OF ANY KIND IS PROVIDED.
+  Permission is hereby granted, free of charge, to anyone
+  obtaining a copy of this document and accompanying files,
+  to do whatever they want with them without any restriction,
+  including, but not limited to, copying, modification and redistribution.
+  NO WARRANTY OF ANY KIND IS PROVIDED.
 
-   MeetJeStad board setup : https://github.com/meetjestad/mjs_boards/raw/master/package_meetjestad.net_index.json
+  MeetJeStad board setup : https://github.com/meetjestad/mjs_boards/raw/master/package_meetjestad.net_index.json
 
-   In order to compile the following libraries need to be installed:
-   - "DHT.h" (local copy, improved timing)
-   - NeoGPS (mjs-specific fork): https://github.com/meetjestad/NeoGPS see also project-specific config-file in libraries zip
-   - Adafruit_SleepyDog: https://github.com/adafruit/Adafruit_SleepyDog
-   - lmic https://github.com/matthijskooijman/arduino-lmic 1.5.0+arduino-2
-   - SDS011 by Rajko Zschiegner 
-   - AltSoftSerial
+  In order to compile the following libraries need to be installed:
+  - "DHT.h" (local copy, improved timing)
+  - NeoGPS (mjs-specific fork): https://github.com/meetjestad/NeoGPS see also project-specific config-file in libraries zip
+  - Adafruit_SleepyDog: https://github.com/adafruit/Adafruit_SleepyDog
+  - lmic https://github.com/matthijskooijman/arduino-lmic 1.5.0+arduino-2
+  - SDS011 by Rajko Zschiegner (changed version, placed locally)
+  - AltSoftSerial
 
-   - Arduino-IDE version 1.8.9 (1.8.10 failed on linker-issues related to LMIC)
- *******************************************************************************/
+  - Arduino-IDE version 1.8.9 (1.8.10 failed on linker-issues related to LMIC)
+*******************************************************************************/
 
 // include external libraries
 #include <AltSoftSerial.h>
@@ -28,7 +28,8 @@
 #include <Adafruit_SleepyDog.h>
 #include <avr/power.h>
 #include <util/atomic.h>
-#include "SDS011.h"                  
+#include <avr/eeprom.h>
+#include "SDS011.h"
 #include "DHT.h"
 #include "version.h"
 
@@ -45,10 +46,9 @@
 #define SW_GND_PIN     20
 #define LED_PIN        21
 #define SW_GND_SDS_PIN (8  /*D8*/)
-#define DHTPIN         7       
+#define DHTPIN         7
 #define DHTTYPE        DHT22    // (MM) DHT 22  (AM2305), AM2321
 #define LOW_BAT_PIN    5
-
 
 // This sets the ratio of the battery voltage divider attached to A0,
 // below works for 100k to ground and 470k to the battery. A setting of
@@ -58,19 +58,20 @@
 #define BATTERY_DIVIDER_RATIO ((120.0 + 330.0) / 120.0)
 
 // Most recently read values (stored in global variables)
-float temperature;  // outside-temperature
-float CpuTemp;      // cpu-temperature
-float humidity;     // outside-humidity
-int32_t lat32;      // GNSS lat in deg
-int32_t lon32;      // GNSS lon in deg
-int16_t alt16;      // GNSS altitude in meters
+float temperature = 0.0;  // outside-temperature
+float CpuTemp = 0.0;      // cpu-temperature
+float humidity = 0.0;     // outside-humidity
+int32_t lat32 = 0;        // GNSS lat in deg
+int32_t lon32 = 0;        // GNSS lon in deg
+int16_t alt16 = 0;        // GNSS altitude in meters
 #ifdef GPS_FIX_HDOP
-  int16_t hdop16;     //  Horizontal Dilution of Precision
+int16_t hdop16 = 0;       //  Horizontal Dilution of Precision
 #endif
 
-float Vbat;         // battery voltage
-uint8_t LowBat;
-float pm2_5, pm10;  // particle sensor
+float Vbat = 0.0;         // battery voltage
+uint8_t LowBat = 0;
+float pm2_5 = -1.0;       // particle sensor
+float pm10 = -1.0;
 
 // Sensor objects
 SDS011        sds;                         // Serial Dust sensor
@@ -78,21 +79,22 @@ NMEAGPS       gps;                         // Serial GNSS sensor (global navigat
 DHT           ht(DHTPIN, DHTTYPE, 2);      // AM2305 sensor for temp/hum, 2:override 0/1 threshold in lib. Lib has been altered to avoid timing-issues
 AltSoftSerial gpsSerial(GPS_PIN, GPS_PIN); // Serial port for GNSS
 gps_fix       gps_data;
- 
+
 // Lora Payload Buffer
 uint8_t mydata[15];
 uint8_t mydata_size;
 uint8_t uplink_data[2];
-uint8_t uplink_port;
-uint8_t JoinedStatus;
+uint8_t uplink_port = 0;
+uint8_t JoinedStatus = 0;
 
-
-// setup timing variables
-uint16_t update_interval_secs; 
-uint8_t  dust_delay_secs ;
+// setup initial timing variables
+uint16_t update_interval_secs = 120;
+uint8_t  dust_delay_secs = 4;
 uint16_t const GPS_TIMEOUT = 120000;                  // 120 secs
+uint8_t dust_num_meas = 5;
+uint8_t dust_interval_delay_secs = 1;
 
-uint16_t update_iterator_cnt; // 0: , 3: generates GPS
+uint16_t update_iterator_cnt = 0; // 0: , 3: generates GPS
 uint8_t PacketType, PacketTypeNext;
 
 // Function Prototypes
@@ -101,45 +103,54 @@ unsigned char AiD_add_uint16 (unsigned char idx_in, uint16_t value) ;
 
 void setup() {
   // when in debugging mode start serial connection
-  if(DEBUG) {
+  if (DEBUG) {
     Serial.begin(115200);
   }
- 
+
   // we expect the a high battery load here. Bat will indicate low here for a short while.
   if (digitalRead(LOW_BAT_PIN) == 0)
-    LowBat=10;
+    LowBat = 10;
   else
-    LowBat=0;
-  
-  JoinedStatus = 0;
-  uplink_port = 0;
-  update_interval_secs = 120; 
-  dust_delay_secs = 5;
-  update_iterator_cnt = 0; // 0: , 3: generates GPS
-    
-  // start communication to sensors
+    LowBat = 0;
+
+  if (eeprom_read_byte((uint8_t*)EEPROM_AID_HITTE_START) == 0xA3) {
+    update_interval_secs      = eeprom_read_word((uint16_t*)EEPROM_AID_HITTE_START + 1);
+    dust_interval_delay_secs  = eeprom_read_byte((uint8_t*)EEPROM_AID_HITTE_START + 5);
+    dust_num_meas             = eeprom_read_byte((uint8_t*)EEPROM_AID_HITTE_START + 6);
+    dust_delay_secs           = eeprom_read_byte((uint8_t*)EEPROM_AID_HITTE_START + 7);
+  }
+  Serial.print(F("Tupdate: "));
+  Serial.println(update_interval_secs);
+  Serial.print(F("TDust_del: "));
+  Serial.println(dust_interval_delay_secs);
+  Serial.print(F("Dust_num_meas: "));
+  Serial.println(dust_num_meas);
+  Serial.print(F("dust_delay_secs: "));
+  Serial.println(dust_delay_secs);
+
+  Serial.print(F("SW-ver: "));
+  Serial.println(SW_VERSION);
+
+   // start communication to sensors
   gpsSerial.begin(9600);
   sds.begin(SDSrxPin, SDStxPin);                             // Software serial port for particle sensor
   sds.sleep();
 
- 
   // setup switched ground and power down connected peripherals (GPS module)
   pinMode(SW_GND_PIN, OUTPUT);
   digitalWrite(SW_GND_PIN, LOW); // initially, GPS is disabled
 
-  
   // setup LoRa transceiver
   mjs_lmic_setup();
 
-  
   // blink 'hello'
-  #if 0
-    pinMode(LED_PIN, OUTPUT);
-    digitalWrite(LED_PIN, HIGH);
-    delay(500);
-    digitalWrite(LED_PIN, LOW);
-  #endif
- 
+#if 0
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+  delay(500);
+  digitalWrite(LED_PIN, LOW);
+#endif
+
   // Make sure we have the initial power-up Vbat and CpuTemp (for debugging / calibration)
   getVBat();
   GetCpuTemp();
@@ -148,32 +159,31 @@ void setup() {
 void loop() {
   // We need to calculate how long we should sleep, so we need to know how long we were awake
   unsigned long startMillis = millis();
-  Serial.print(F("Time-loop-entry "));
-  Serial.print(millis() / 1000);
-  Serial.println(F(" sec "));
-  
-  // Activate and read our sensors (do it in a loop for sensor debugging)
-  #if 0
-    while (1) {
-      Update_Iterator();
-      AcquireSensorData();
-      dumpSensorData();
-      //delay(3000);
-    }
-  #else 
-      if (JoinedStatus==1) {
-        Update_Iterator();
-        AcquireSensorData();
-        dumpSensorData();
-      }
-  #endif
+  //Serial.print(F("Time-loop-entry "));
+  //Serial.print(millis() / 1000);
+  //Serial.println(F(" sec "));
 
-  if (LowBat>0)
-    LowBat = LowBat-1;
-  Serial.print(F("Low Bat: "));
-  Serial.println(LowBat);
-  
-  
+  // Activate and read our sensors (do it in a loop for sensor debugging)
+#if 0
+  while (1) {
+    Update_Iterator();
+    AcquireSensorData();
+    dumpSensorData();
+    //delay(3000);
+  }
+#else
+  if (JoinedStatus == 1) {
+    Update_Iterator();
+    AcquireSensorData();
+    dumpSensorData();
+  }
+#endif
+
+  if (LowBat > 0)
+    LowBat = LowBat - 1;
+  //Serial.print(F("Low Bat: "));
+  //Serial.println(LowBat);
+
   // Work around a race condition in LMIC, that is greatly amplified
   // if we sleep without calling runloop and then queue data
   // See https://github.com/lmic-lib/lmic/issues/3
@@ -186,73 +196,80 @@ void loop() {
 
   // check for received UPLINK data
   if (uplink_port != 0) {
-              Serial.print(F("Data Received @port "));
-              Serial.print(uplink_port);
-              Serial.print(F("="));
-              Serial.print(uplink_data[0]);
-              Serial.print(F(" "));
-              Serial.println(uplink_data[1]);
-                
-              switch (uplink_port) { // port
-                case 2 : update_interval_secs = uplink_data[0] | (uplink_data[1]<<8);
-                         Serial.println(update_interval_secs);
-                         update_iterator_cnt = 0;
-                         break;
-                case 3 : if ( uplink_data[0]>1 and  uplink_data[0]<50) // in range?
-                         {
-                           dust_delay_secs = uplink_data[0] ;
-                           Serial.println(dust_delay_secs);
-                           update_iterator_cnt = 0;
-                         }
-                         break;
-                case 4 : update_iterator_cnt = 0;
-                        break;
-            }
-            uplink_port = 0;
-          }
+    //Serial.print(F("Data Received @port "));
+    //Serial.print(uplink_port);
+    //Serial.print(F("="));
+    //Serial.print(uplink_data[0]);
+    //Serial.print(F(" "));
+    //Serial.println(uplink_data[1]);
 
+    switch (uplink_port) { // port
+      case 2 : update_interval_secs = uplink_data[0] | (uplink_data[1] << 8);
+        //Serial.println(update_interval_secs);
+        update_iterator_cnt = 0;
+        break;
+      case 3 : if ( uplink_data[0] > 1 and  uplink_data[0] < 50) // in range?
+        {
+          dust_delay_secs = uplink_data[0] ;
+          //Serial.println(dust_delay_secs);
+          update_iterator_cnt = 0;
+        }
+        break;
+      case 4 : update_iterator_cnt = 0;
+        break;
+      case 5: if ( uplink_data[0] > 0 and  uplink_data[0] < 10) // in range?
+        {
+          dust_interval_delay_secs  = uplink_data[0];
+          dust_num_meas             = uplink_data[1];
+          //Serial.println(dust_interval_delay_secs);
+          //Serial.println(dust_num_meas);
+        }
+    }
+    uplink_port = 0;
+    eeprom_write_word((uint16_t*)EEPROM_AID_HITTE_START + 1, update_interval_secs);
+    eeprom_write_byte((uint8_t*) EEPROM_AID_HITTE_START + 5, dust_interval_delay_secs);
+    eeprom_write_byte((uint8_t*) EEPROM_AID_HITTE_START + 6, dust_num_meas);
+    eeprom_write_byte((uint8_t*) EEPROM_AID_HITTE_START + 7, dust_delay_secs);
+    eeprom_write_byte((uint8_t*) EEPROM_AID_HITTE_START, 0xA3);
+  }
 
   // Schedule sleep
   // default sleep
-  unsigned long sleepDuration = (unsigned long)update_interval_secs*1000; //UPDATE_INTERVAL;
-  
+  unsigned long sleepDuration = (unsigned long)update_interval_secs * 1000; //UPDATE_INTERVAL;
+
   // extend SleepDuration when the battery is low
-  if (LowBat>0) {
-    sleepDuration=sleepDuration*10;
-    Serial.println(F("PowerSaving mode")); 
+  if (LowBat > 0) {
+    sleepDuration = sleepDuration * 10;
+    Serial.println(F("PowerSaving mode"));
   }
   // if we are about to, or have just sent a special packet, split the sleepduration into two
-  if (PacketTypeNext!=3 || PacketType!=3) sleepDuration=(unsigned long)sleepDuration/2; //UPDATE_INTERVAL/2; // we are about to transmit a mid/low pri packet, or we will do so the next packet => the mid/low packet will be correctly spaced in time
+  if (PacketTypeNext != 3 || PacketType != 3) sleepDuration = (unsigned long)sleepDuration / 2; //UPDATE_INTERVAL/2; // we are about to transmit a mid/low pri packet, or we will do so the next packet => the mid/low packet will be correctly spaced in time
 
 
 
-  Serial.print(F("Uncompensated interval: ")); 
-  Serial.println((unsigned long)sleepDuration);
-  sleepDuration = sleepDuration *181/120;
-  Serial.print(F("Scaled interval: ")); 
-  Serial.println((unsigned long)sleepDuration);
- 
+  //Serial.print(F("Uncompensated interval: "));
+  //Serial.println((unsigned long)sleepDuration);
+  sleepDuration = sleepDuration * 181 / 120;
+  //Serial.print(F("Scaled interval: "));
+  //Serial.println((unsigned long)sleepDuration);
+
   unsigned long msPast = millis() - startMillis;
   if (msPast < sleepDuration)
     sleepDuration -= msPast;
   else
     sleepDuration = 0;
 
-
-
   if (DEBUG) {
     Serial.print(F("Time "));
     Serial.print(millis() / 1000);
     Serial.println(F(" sec "));
-  
-    
+
     Serial.print(F("Sleeping for "));
     Serial.print(sleepDuration);
     Serial.print(F("ms... "));
     Serial.flush();
   }
 
-  
   doSleep(sleepDuration);
   if (DEBUG) {
     Serial.println(F("Woke up."));
@@ -270,13 +287,13 @@ void doSleep(uint32_t time) {
     else
       slept = Watchdog.sleep(8000);
 
- 
-   // we expect the higest battery load here. Bat will indicate low here for a short while.
-   if (digitalRead(LOW_BAT_PIN) == 0)
-    LowBat=10;
 
-     
- 
+    // we expect the higest battery load here. Bat will indicate low here for a short while.
+    if (digitalRead(LOW_BAT_PIN) == 0)
+      LowBat = 10;
+
+
+
     // Update the millis() and micros() counters, so duty cycle
     // calculations remain correct. This is a hack, fiddling with
     // Arduino's internal variables, which is needed until
@@ -288,7 +305,7 @@ void doSleep(uint32_t time) {
       // timer0 uses a /64 prescaler and overflows every 256 timer ticks
       timer0_overflow_count += microsecondsToClockCycles((uint32_t)slept * 1000) / (64 * 256);
     }
- 
+
     if (slept >= time)
       break;
     time -= slept;
@@ -298,108 +315,99 @@ void doSleep(uint32_t time) {
   ADCSRA |= (1 << ADEN);
 }
 
-void queueData() 
+void queueData()
 {
   mydata_size = 0;              // init
   switch (PacketType) {
     case 0:  mydata[mydata_size++] = 0; // dummy packet
-    
+
     case 1:  // Compose AiD message with Location
-              mydata[mydata_size++] = 0xB; 
- 
-              mydata_size = AiD_add_uint32(mydata_size,  (uint32_t)(lat32 & 0xFFFFFFFF));
-              mydata_size = AiD_add_uint32(mydata_size,  (uint32_t)(lon32 & 0xFFFFFFFF));
-              mydata_size = AiD_add_uint16(mydata_size,  (uint16_t)(alt16 & 0xFFFF));
-              #ifdef GPS_FIX_HDOP
-                mydata_size = AiD_add_uint16(mydata_size,  (uint16_t)(hdop16 & 0xFFFF));
-              #else
-                mydata_size = AiD_add_uint16(mydata_size,  (uint16_t)0);
-              #endif
-              mydata[mydata_size++] = SW_VERSION  & 0xFF;   
+      mydata[mydata_size++] = 0xB;
 
-              break;
+      mydata_size = AiD_add_uint32(mydata_size,  (uint32_t)(lat32 & 0xFFFFFFFF));
+      mydata_size = AiD_add_uint32(mydata_size,  (uint32_t)(lon32 & 0xFFFFFFFF));
+      mydata_size = AiD_add_uint16(mydata_size,  (uint16_t)(alt16 & 0xFFFF));
+#ifdef GPS_FIX_HDOP
+      mydata_size = AiD_add_uint16(mydata_size,  (uint16_t)(hdop16 & 0xFFFF));
+#else
+      mydata_size = AiD_add_uint16(mydata_size,  (uint16_t)0);
+#endif
+      mydata[mydata_size++] = SW_VERSION  & 0xFF;
+      break;
 
-     case 2:  // Apeldoorn In data Rev2 (send battery status, CPU-Temp)
-              mydata[mydata_size++] = 0xD; 
-              mydata_size = AiD_add_uint16(mydata_size, round(CpuTemp*10));
-              mydata_size = AiD_add_uint16(mydata_size, round(Vbat*100));
-              mydata[mydata_size++] = (LowBat) & 0xFF;   
-              break;
-               
-     case 3:  // Compose AiD message with Particle Density, humidity, temperature 
-              mydata[mydata_size++] = 0xE; 
-              mydata_size = AiD_add_uint16(mydata_size,  round(pm2_5*10.0)); // pm: 0 - 999.9  x10 = 0-10000 
-              mydata_size = AiD_add_uint16(mydata_size,  round(pm10*10.0));
-              mydata_size = AiD_add_uint16(mydata_size,  round(humidity*10));
-              mydata_size = AiD_add_uint16(mydata_size,  round(temperature*10));
-              break;
-     default: ;// should never happen
-          
+    case 2:  // Apeldoorn In data Rev2 (send battery status, CPU-Temp)
+      mydata[mydata_size++] = 0xD;
+      mydata_size = AiD_add_uint16(mydata_size, round(CpuTemp * 10));
+      mydata_size = AiD_add_uint16(mydata_size, round(Vbat * 100));
+      mydata[mydata_size++] = (LowBat) & 0xFF;
+      break;
+
+    case 3:  // Compose AiD message with Particle Density, humidity, temperature
+      mydata[mydata_size++] = 0xE;
+      mydata_size = AiD_add_uint16(mydata_size,  round(pm2_5 * 10.0)); // pm: 0 - 999.9  x10 = 0-10000
+      mydata_size = AiD_add_uint16(mydata_size,  round(pm10 * 10.0));
+      mydata_size = AiD_add_uint16(mydata_size,  round(humidity * 10));
+      mydata_size = AiD_add_uint16(mydata_size,  round(temperature * 10));
+      break;
+    default: ;// should never happen
+
   } // case
 
   //LMIC_setDrTxpow(DR_SF7, 14); // sf7: hoge BPS
-    LMIC_setDrTxpow(DR_SF9, 14);
+  LMIC_setDrTxpow(DR_SF9, 14);
 
-    // Check if there is not a current TX/RX job running
-    if (LMIC.opmode & OP_TXRXPEND) {
-        Serial.println(F("OP_TXRXPEND, not sending"));
-    } else  {
-       // Prepare upstream data transmission at the next possible time.
-      LMIC_setTxData2(mydata[0], &mydata[1], mydata_size-1, 0); // packet-type as port
-    }
-    
-    Serial.println(("Packet-type ") + String(PacketType) + (" queued. Size=")+ String(mydata_size) + (". Next type ")+ String(PacketTypeNext));
-     
+  // Check if there is not a current TX/RX job running
+  if (LMIC.opmode & OP_TXRXPEND) {
+    Serial.println(F("OP_TXRXPEND, not sending"));
+  } else  {
+    // Prepare upstream data transmission at the next possible time.
+    LMIC_setTxData2(mydata[0], &mydata[1], mydata_size - 1, 0); // packet-type as port
+  }
+
+  Serial.println(("Packet-type ") + String(PacketType) + (" queued. Size=") + String(mydata_size) + (". Next type ") + String(PacketTypeNext));
 }
 
 void Update_Iterator () {
 
   update_iterator_cnt++; // 16 bits => wraps around in 0xFFFF increments => divs below must be powers of 2, for even distribution over time
-  PacketType=3;          // default HI PRI, unless changed below
-  
+  PacketType = 3;        // default HI PRI, unless changed below
+
   if (update_iterator_cnt % 128 == 4) { // lowest PRI, shifted in time W.R.T. mid PRI
-   // Serial.println(F("Low Pri"));
-    PacketType=1;
+    // Serial.println(F("Low Pri"));
+    PacketType = 1;
   }
 
   if (update_iterator_cnt % 8 == 0) { // mid PRI // 8
     //Serial.println(F("Mid Pri"));
-    PacketType=2;
+    PacketType = 2;
   }
 
-  if (PacketType==3) {                // Hi PRI
+  if (PacketType == 3) {              // Hi PRI
     //Serial.println(F("Hi Pri"));
   }
 
   PacketTypeNext = 3;
-  if ((update_iterator_cnt+1) % 32 == 4) PacketTypeNext = 1;
-  if ((update_iterator_cnt+1) % 8 == 0) PacketTypeNext = 2;
-  
+  if ((update_iterator_cnt + 1) % 32 == 4) PacketTypeNext = 1;
+  if ((update_iterator_cnt + 1) % 8 == 0) PacketTypeNext = 2;
 }
-
-
 
 // ------------------------------
 // Read Sensors
 // ------------------------------
 // Temperature
-float getTemperature(float oldTemp)
+void getTemperature()
 {
-  float newTemp;
-  float tempTemp; 
-    
-  tempTemp = ht.readTemperature();
+  float temp = ht.readTemperature();
   // Check if any reads failed and exit early (to try again).
-  if (isnan(tempTemp)) {
-      Serial.println(F("Failed to read from DHT sensor!"));
-      newTemp = oldTemp;
-     } else
-     newTemp = tempTemp;
-
-  return newTemp;
+  if (isnan(temp)) {
+    Serial.println(F("error DHT"));
+  }
+  else {
+    temperature = temp;
+  }
 }
 
-void GetCpuTemp () 
+void GetCpuTemp ()
 {
   unsigned int wADC;
   double t;
@@ -418,63 +426,76 @@ void GetCpuTemp ()
   ADCSRA |= _BV(ADSC);  // Start the ADC
 
   // Detect end-of-conversion
-  while (bit_is_set(ADCSRA,ADSC));
+  while (bit_is_set(ADCSRA, ADSC));
 
   // Reading register "ADCW" takes care of how to read ADCL and ADCH.
   wADC = ADCW;
 
-  // The offset of 324.31 could be wrong. It is just an indication. 
+  // The offset of 324.31 could be wrong. It is just an indication.
   // Calibration, assuming 1.22 scaling is correct:
   // Assumes device is at room-temperature at first power-up
-  #define wADC_ROOMTEMP (333)
-  #define ROOMTEMP (22.0)
-  #define wADC_OFFSET (ROOMTEMP*1.22-wADC_ROOMTEMP)
+#define wADC_ROOMTEMP (333)
+#define ROOMTEMP (22.0)
+#define wADC_OFFSET (ROOMTEMP*1.22-wADC_ROOMTEMP)
   t = (wADC + wADC_OFFSET ) / 1.22;
-  
-  Serial.print(F("wADC#CpuTemp="));
-  Serial.println(String(wADC));
+
+  //Serial.print(F("wADC#CpuTemp="));
+  //Serial.println(String(wADC));
   CpuTemp = t;
 }
 
 // Humidity
-float getHumidity(float oldHumid)
+void getHumidity()
 {
-  float newHumid ;
-  float tempHumid;
-
-  tempHumid = ht.readHumidity(); // from manual: The minimum interval for reading sensor 2S; reading interval time is less than 2S, may lead to temperature and humidity are not allowed or communication is unsuccessful and so on.
-  if (isnan(tempHumid)) {
-       Serial.println(F("Failed to read from DHT sensor!"));
-       newHumid = oldHumid;
-    } else
-      newHumid = tempHumid;
-    
-  return newHumid;
+  float temp = ht.readHumidity(); // from manual: The minimum interval for reading sensor 2S; reading interval time is less than 2S, may lead to temperature and humidity are not allowed or communication is unsuccessful and so on.
+  if (isnan(temp)) {
+    Serial.println(F("DHT Failed"));
+  }
+  else {
+    humidity = temp;
+  }
 }
 
 // Particle Density
 void getParticleDensity(void)
 {
-  int error;
+  int      error;
   uint16_t dust_delay_ms;
-  
+  float    pm10_tmp, pm2_5_tmp;
+  uint8_t  dust_meas_cnt;
+
   dust_delay_ms = dust_delay_secs * 1000;
-  
-  sds.newwakeup();
-  
+
+  sds.wakeup();
+
   // we expect the higest battery load here. Bat will indicate low here for a short while.
   if (digitalRead(LOW_BAT_PIN) == 0)
-    LowBat=10;
-  
+    LowBat = 10;
+
   delay(dust_delay_ms);
-  error = sds.read(&pm2_5,&pm10);
+  dust_meas_cnt = 0;
+  pm2_5 = 0;
+  pm10 = 0;
+  error = 0;
+  while (not(error) && (dust_meas_cnt < dust_num_meas)) {
+    delay(dust_interval_delay_secs * 1000);
+    error |= sds.read(&pm2_5_tmp, &pm10_tmp);
+    pm2_5 += pm2_5_tmp;
+    pm10  += pm10_tmp;
+    dust_meas_cnt++;
+    Serial.println(("Dust meas #") + String(dust_meas_cnt) + " " + String(pm10_tmp) + " " + String(pm10)  );
+  }
+
   sds.sleep();
 
   if (error) {
     Serial.println(F("Error reading from Dust sensor"));
-    pm2_5 = -1.0;
-    pm10 = -1;
-   }
+    pm2_5 = pm10 = -1.0;
+  }
+  else {
+    pm2_5 /= dust_num_meas;
+    pm10 /= dust_num_meas;
+  }
 }
 
 // Position
@@ -490,8 +511,8 @@ void getPosition()
 
   // check BAT_LOW
   if (digitalRead(LOW_BAT_PIN) == 0)
-    LowBat=10;
- 
+    LowBat = 10;
+
   if (DEBUG)
     Serial.println(F("Waiting for GPS..."));
 
@@ -501,26 +522,26 @@ void getPosition()
   while (millis() - startTime < GPS_TIMEOUT && valid < 10) {
     if (gps.available(gpsSerial)) {
       gps_data = gps.read();
-      
-      #ifdef GPS_FIX_HDOP
-        valid_hdop = gps_data.valid.hdop;
-      #endif
-      
+
+#ifdef GPS_FIX_HDOP
+      valid_hdop = gps_data.valid.hdop;
+#endif
+
       if (gps_data.valid.location && gps_data.valid.altitude &&  gps_data.valid.status && valid_hdop && gps_data.status >= gps_fix::STATUS_STD) { //STATUS_STD (STATUS_DGPS wordt nooit bereikt)
         valid++;
-        lat32 =(int32_t)gps_data.latitudeL() ; // * 32768 / 10000000);
-        lon32 =(int32_t)gps_data.longitudeL() ;//* 32768 / 10000000);
+        lat32 = (int32_t)gps_data.latitudeL() ; // * 32768 / 10000000);
+        lon32 = (int32_t)gps_data.longitudeL() ; //* 32768 / 10000000);
         alt16 = (int16_t)gps_data.altitude();
-        #ifdef GPS_FIX_HDOP
-          hdop16 = (int16_t)gps_data.hdop;
-        #endif  
-      } 
-      #if 1
-      if (gps_data.valid.satellites) {
-        Serial.print(F("#Satellites: "));
-        Serial.println(gps_data.satellites);
+#ifdef GPS_FIX_HDOP
+        hdop16 = (int16_t)gps_data.hdop;
+#endif
       }
-      #endif
+#if 1
+      if (gps_data.valid.satellites) {
+        //Serial.print(F("#Satellites: "));
+        //Serial.println(gps_data.satellites);
+      }
+#endif
     }
   }
   digitalWrite(SW_GND_PIN, LOW);
@@ -534,12 +555,8 @@ void getVBat()
 {
   analogReference(INTERNAL);
   uint16_t reading = analogRead(VBAT_PIN);
-  Vbat = (float)1.1*reading/1023 * BATTERY_DIVIDER_RATIO;
-  
-  
-} 
-
-
+  Vbat = (float)1.1 * reading / 1023 * BATTERY_DIVIDER_RATIO;
+}
 
 // ------------------------------
 // Acquire Sensor Data
@@ -548,14 +565,14 @@ void getVBat()
 void AcquireSensorData ()
 {
   switch (PacketType)  {
-    case 1:  if (LowBat==0)
-               getPosition();
+    case 1:  if (LowBat == 0)
+      getPosition();
     case 2:  getVBat();
-             GetCpuTemp();
-    case 3:  if (LowBat==0)
-               getParticleDensity();                      // via softserial
-             temperature = getTemperature(temperature); // store in global variable, via I2C
-             humidity = getHumidity(humidity);          // store in global variable, via I2C
+      GetCpuTemp();
+    case 3:  if (LowBat == 0)
+      getParticleDensity();        // via softserial
+      getTemperature();            // store in global variable, via I2C
+      getHumidity();               // store in global variable, via I2C
   }
 }
 
@@ -567,13 +584,13 @@ void dumpSensorData() {
 #if 0
   if (gps_data.valid.location && gps_data.valid.status && gps_data.status >= gps_fix::STATUS_STD) {
     Serial.print(F("lat/lon: "));
-    Serial.print(lat32/10000000, 6);
+    Serial.print(lat32 / 10000000, 6);
     Serial.print(F(","));
-    Serial.println(lon32/10000000, 6);
+    Serial.println(lon32 / 10000000, 6);
     Serial.println(alt16);
-    #ifdef GPS_FIX_HDOP
-      Serial.println(hdop16);
-    #endif
+#ifdef GPS_FIX_HDOP
+    Serial.println(hdop16);
+#endif
   } else {
     Serial.println(F("No GPS fix"));
   }
@@ -581,14 +598,14 @@ void dumpSensorData() {
 
 #if 0
   Serial.print(F("temp=") + String(temperature) + F("degC  "));
-  Serial.println(F("hum=") + String(humidity)+ F("%  "));
+  Serial.println(F("hum=") + String(humidity) + F("%  "));
   Serial.println(F("particles 2.5um/10um: ") + String(pm2_5) + F("/") + String(pm10) + F(" ug/m3") );
 #endif
 
 #if 0
-  Serial.println(F("Vbat=") + String(Vbat)+ " V");
+  Serial.println(F("Vbat=") + String(Vbat) + " V");
   Serial.println(F("CpuTemp=") + String(CpuTemp) + " degC  ");
-#endif  
+#endif
   Serial.flush();
 }
 
@@ -597,17 +614,17 @@ void dumpSensorData() {
 // ------------------------------
 
 // UINT32
-unsigned char AiD_add_uint32 (unsigned char idx_in, uint32_t value) { 
-   for (uint8_t i=0; i<4; i++) {
-     mydata[idx_in++] = (value>>24) & 0xFF; // msb 
-     value= value <<8;                      // shift-left
-   }
-   return (idx_in);
- }
+unsigned char AiD_add_uint32 (unsigned char idx_in, uint32_t value) {
+  for (uint8_t i = 0; i < 4; i++) {
+    mydata[idx_in++] = (value >> 24) & 0xFF; // msb
+    value = value << 8;                    // shift-left
+  }
+  return (idx_in);
+}
 
- // UINT16
-unsigned char AiD_add_uint16 (unsigned char idx_in, uint16_t value) { 
-   mydata[idx_in++] = (value>>8) & 0xFF; // msb 
-   mydata[idx_in++] = (value) & 0xFF;    // lsb
-   return (idx_in);
- }
+// UINT16
+unsigned char AiD_add_uint16 (unsigned char idx_in, uint16_t value) {
+  mydata[idx_in++] = (value >> 8) & 0xFF; // msb
+  mydata[idx_in++] = (value) & 0xFF;    // lsb
+  return (idx_in);
+}
